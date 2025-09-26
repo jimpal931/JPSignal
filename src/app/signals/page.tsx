@@ -15,7 +15,7 @@ export default async function SignalsPage() {
     <main className="p-6 space-y-4">
       <h1 className="text-xl font-semibold">Stock Signals</h1>
       <p className="text-sm text-gray-600">
-        Enter a ticker and select a methodology. Results are generated from fresh market data.
+        Enter a ticker and select a methodology. Results are generated from 15 min market delay.
       </p>
       <SignalForm />
     </main>
