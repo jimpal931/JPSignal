@@ -83,6 +83,7 @@ Then:
 
 // ---- helpers ----
 function nowNy() {
+  // Returns "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS" in America/New_York
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     year: "numeric",
@@ -99,21 +100,50 @@ function nowNy() {
   return { date: `${y}-${m}-${d}`, ts: `${y}-${m}-${d} ${hms}` };
 }
 
+// separate session-time helper for market hours logic
+function nowMinutesNy(): { mins: number; dow: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+
+  const hh = Number(parts.find(p => p.type === "hour")?.value ?? "0");
+  const mm = Number(parts.find(p => p.type === "minute")?.value ?? "0");
+  const dowStr = parts.find(p => p.type === "weekday")?.value ?? "Mon";
+  const dowMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return { mins: hh * 60 + mm, dow: dowMap[dowStr] ?? 1 };
+}
+
+function isRegularTradingHoursNy(): boolean {
+  const { mins, dow } = nowMinutesNy();
+  if (dow === 0 || dow === 6) return false;        // weekend
+  return mins >= (9 * 60 + 30) && mins < (16 * 60);// 09:30–16:00 ET
+}
+
+function isFirst15MinNy(): boolean {
+  const { mins } = nowMinutesNy();
+  return mins >= (9 * 60 + 30) && mins < (9 * 60 + 45);
+}
+
+function isPostCloseNy(): boolean {
+  const { mins } = nowMinutesNy();
+  // after 16:05 ET or before 09:30 ET → treat as outside cash session
+  return mins >= (16 * 60 + 5) || mins < (9 * 60 + 30);
+}
+
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }
 
-function entryTimingNy(): "market_open" | "intraday_breakout" {
-  const str = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(new Date());
-  const [hh, mm] = str.split(":").map(Number);
-  const mins = hh * 60 + mm;
-  if (mins >= 9 * 60 + 30 && mins <= 9 * 60 + 45) return "market_open";
-  return "intraday_breakout";
+type EntryTiming = "market_open" | "intraday_breakout" | "intraday_breakdown";
+function entryTimingNy(direction: "long" | "short"): EntryTiming {
+  // Outside RTH or first 15 minutes → wait for market open
+  if (!isRegularTradingHoursNy() || isFirst15MinNy()) return "market_open";
+  // During RTH: breakout for longs, breakdown for shorts
+  return direction === "long" ? "intraday_breakout" : "intraday_breakdown";
 }
 
 function widthFor(ltp: number) {
@@ -130,17 +160,12 @@ function withTimeout<T>(p: Promise<T>, ms = 8000): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("timeout")), ms);
     p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      }
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
     );
   });
 }
+
 
 const DEBUG = process.env.NODE_ENV !== "production";
 
@@ -174,7 +199,18 @@ export async function POST(req: NextRequest) {
     const bid = snap?.ticker?.lastQuote?.bp;
     const ask = snap?.ticker?.lastQuote?.ap;
     const nbboMid = bid && ask ? (bid + ask) / 2 : undefined;
-    const ltp = nbboMid ?? lastTrade ?? prev?.c ?? day?.c;
+    // Prefer today's close over previous close; clamp to today's close after RTH
+    let ltp = nbboMid ?? lastTrade ?? day?.c ?? prev?.c ?? day?.o;
+
+    if (isPostCloseNy() && day?.c) {
+  ltp = day.c;
+    }
+
+    if (DEBUG) {
+      console.log("[signal-v2] price sources", {
+      nbboMid, lastTrade, dayC: day?.c, prevC: prev?.c, finalLtp: ltp
+      });
+    }
 
     if (!ltp || !day || !prev) {
       return insuff("snapshot missing ltp/day/prev");
@@ -333,7 +369,7 @@ export async function POST(req: NextRequest) {
       direction,
       entry_low: round2(entryLow),
       entry_high: round2(entryHigh),
-      ENTRY_TIMING: entryTimingNy(),
+      ENTRY_TIMING: entryTimingNy(direction),
 
       stop: round2(stop),
       tp1: round2(tp1),
