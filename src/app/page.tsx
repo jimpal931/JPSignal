@@ -31,6 +31,13 @@ export default async function Page() {
           <BillingPortalButton />
         </div>
       )}
+
+      {email && pro && (
+        <div className="space-x-3">
+          <Link className="underline" href="/leaps">Open Leaps</Link>
+          <BillingPortalButton />
+        </div>
+      )}
     </main>
   );
 }

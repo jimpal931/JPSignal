@@ -4,6 +4,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 import { isProByEmail } from "@/lib/isPro";
 import SignalForm from "@/components/SignalForm";
+import Link from "next/link";
 
 export default async function SignalsPage() {
   const session = await getServerSession(authOptions);
@@ -18,6 +19,12 @@ export default async function SignalsPage() {
         Enter a ticker and select a methodology. Results are generated from 15 min market delay.
       </p>
       <SignalForm />
+      <p className="text-sm">
+        Looking for LEAP options?{" "}
+        <Link href="/leaps" className="text-blue-600 hover:underline">
+          Go to LEAP Signals →
+        </Link>
+      </p>
     </main>
   );
 }
