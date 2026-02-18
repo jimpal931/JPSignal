@@ -35,7 +35,7 @@ You will be provided a JSON payload with all numbers. Use only those numbers—d
 const STOCKS_V2_FORMAT = String.raw`
 OUTPUT FORMAT (must match exactly; no extra lines)
 Title:
-“{{TICKER}} JPSignals Stock Signal {{DATE}}”
+“{{TICKER}} AInsight Stock Signal {{DATE}}”
 
 Then:
 “# {{TICKER}} Stock Analysis Summary ({{DATE}})”
@@ -419,7 +419,7 @@ export async function POST(req: NextRequest) {
 
     const resp = await withTimeout(
       client.responses.create({
-        model: "gpt-5",
+        model: "gpt-5.2",
         input: [
           { role: "system", content: SYSTEM + "\n\n" + STOCKS_V2_FORMAT },
           { role: "user", content: userPrompt },
@@ -440,7 +440,7 @@ export async function POST(req: NextRequest) {
       return insuff("LLM note failed heuristic");
     }
 
-    const wantedTitle = `${ticker} JPSignals Stock Signal ${payload.date}`;
+    const wantedTitle = `${ticker} AInsght Stock Signal ${payload.date}`;
     const normalized = out.replace(/^[^\n]*\n?/, wantedTitle + "\n");
 
     await incrementUsage(user.id, "stock");

@@ -25,7 +25,7 @@ const inSchema = z.object({
 });
 
 // ---- model prompt ----
-const SYSTEM = `You are “JP Signals — LEAP V2 (Options Auto-Fill)”.
+const SYSTEM = `You are “AInsight Signals — LEAP V2 (Options Auto-Fill)”.
 
 Goal: Given a ticker and TWO precomputed LEAP candidates (one CALL, one PUT) plus underlying context, produce a single-page LEAP trading note. You must CHOOSE either the CALL or the PUT and fill out one final trade. Output only the note—no extra commentary, no links, no images.
 
@@ -529,7 +529,7 @@ export async function POST(req: NextRequest) {
 
     const resp = await withTimeout(
       client.responses.create({
-        model: "gpt-5", // or "gpt-4o"
+        model: "gpt-5.2", // or "gpt-4o"
         input: [
           { role: "system", content: SYSTEM + "\n\n" + LEAPS_V2_FORMAT },
           { role: "user", content: userPrompt },
@@ -550,7 +550,7 @@ export async function POST(req: NextRequest) {
       out.length > 200;
     if (!looksLike) return insuff("LLM note failed heuristic");
 
-    const wantedTitle = `${ticker} JP Signals LEAP V3 ${date}`;
+    const wantedTitle = `${ticker} AInsight Signals LEAP V3 ${date}`;
     const normalized = out.replace(/^[^\n]*\n?/, wantedTitle + "\n");
 
     await incrementUsage(user.id, "leap");
