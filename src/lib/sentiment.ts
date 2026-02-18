@@ -1,98 +1,108 @@
-// src/lib/sentiment.ts
 import OpenAI from "openai";
 
-export type NewsItem = {
+// --- Types ---
+
+// The shape of a single news item from Polygon API
+interface PolygonNewsItem {
+  id: string;
+  publisher: {
+    name: string;
+    homepage_url: string;
+    logo_url?: string;
+    favicon_url?: string;
+  };
   title: string;
-  url?: string | null;
-  published_utc?: string | null;
-};
+  author?: string;
+  published_utc: string;
+  article_url: string;
+  tickers: string[];
+  amp_url?: string;
+  image_url?: string;
+  description?: string;
+}
 
 export type SentimentResult = {
-  label: "bullish" | "bearish" | "neutral";
-  score: number; // -1 .. +1
+  label: "Bullish" | "Bearish" | "Neutral";
+  score: number; // -1 to +1
   summary: string;
-  sources: { title: string; url?: string | null }[];
   headlines: { title: string; url?: string | null; date?: string | null }[];
 };
 
-// safe fallback
+// --- Helper: Safe Default ---
 function safeDefault(): SentimentResult {
   return {
-    label: "neutral",
+    label: "Neutral",
     score: 0,
     summary: "No reliable news signal.",
-    sources: [],
     headlines: [],
   };
 }
 
-// Polygon News fetch
-async function fetchPolygonNews(ticker: string, limit = 8): Promise<NewsItem[]> {
+// --- Main Function ---
+export async function llmNewsSentiment(ticker: string): Promise<SentimentResult> {
   try {
-    const key = process.env.POLYGON_API_KEY!;
-    const url = `https://api.polygon.io/v2/reference/news?ticker=${encodeURIComponent(
-      ticker
-    )}&limit=${limit}&apiKey=${key}`;
-    const r = await fetch(url);
-    if (!r.ok) return [];
-    const j = await r.json();
-    return Array.isArray(j.results) ? j.results : [];
-  } catch {
-    return [];
-  }
-}
+    const apiKey = process.env.POLYGON_API_KEY;
+    if (!apiKey) return safeDefault();
 
-export async function llmNewsSentiment(
-  ticker: string
-): Promise<SentimentResult> {
-  try {
-    const headlines = await fetchPolygonNews(ticker, 8);
-    if (!headlines.length) return safeDefault();
+    // 1. Fetch from Polygon (Last 5 articles)
+    const url = `https://api.polygon.io/v2/reference/news?ticker=${ticker}&limit=5&apiKey=${apiKey}`;
+    
+    // Cache for 1 hour to save API calls
+    const r = await fetch(url, { next: { revalidate: 3600 } });
+    
+    if (!r.ok) return safeDefault();
+    
+    const data = await r.json();
+    
+    // STRICT TYPING FIX: explicit cast to our interface
+    const results = (data.results || []) as PolygonNewsItem[];
 
-    const textBlocks = headlines
-      .map((h) => `• ${h.title}`)
-      .slice(0, 8)
+    if (results.length === 0) return safeDefault();
+
+    // 2. Format for LLM
+    const headlinesText = results
+      .map((h, i) => `${i + 1}. ${h.title} (${h.published_utc.split("T")[0]})`)
       .join("\n");
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    const prompt = `
-You are a financial news sentiment model.
-Analyze the following headlines for ticker ${ticker} and output JSON ONLY.
+    const systemPrompt = `You are a financial news sentiment model.
+Analyze the following headlines for ${ticker}.
+Return a JSON object with:
+- "label": "Bullish", "Bearish", or "Neutral"
+- "score": number between -1.0 and 1.0
+- "summary": A 1-sentence summary of the news sentiment.`;
 
-Return fields:
-- label: "bullish" | "bearish" | "neutral"
-- score: -1 to +1
-- summary: brief reason
-
-Headlines:
-${textBlocks}
-
-Respond strictly in JSON.
-    `.trim();
-
-    const resp = await client.responses.create({
+    // 3. Call OpenAI (using gpt-5-mini)
+    const completion = await client.chat.completions.create({
       model: "gpt-5-mini",
-      input: prompt,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: headlinesText },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.2,
     });
 
-    const raw = (resp.output_text ?? "").trim();
-    if (!raw.startsWith("{")) return safeDefault();
+    const content = completion.choices[0]?.message?.content;
+    if (!content) return safeDefault();
 
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(content);
 
+    // 4. Return formatted result
     return {
-      label: parsed.label ?? "neutral",
-      score: parsed.score ?? 0,
-      summary: parsed.summary ?? "No clear signal.",
-      sources: headlines.map((h) => ({ title: h.title, url: h.url })),
-      headlines: headlines.map((h) => ({
+      label: parsed.label || "Neutral",
+      score: parsed.score || 0,
+      summary: parsed.summary || "Sentiment analysis unavailable.",
+      headlines: results.map((h) => ({
         title: h.title,
-        url: h.url,
-        date: h.published_utc ? h.published_utc.slice(0, 10) : null,
+        url: h.article_url,
+        date: h.published_utc ? h.published_utc.split("T")[0] : null,
       })),
     };
-  } catch {
+
+  } catch (error) {
+    console.error("[NEWS_SENTIMENT_ERROR]", error);
     return safeDefault();
   }
 }

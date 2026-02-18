@@ -13,6 +13,8 @@ import {
 } from "@/lib/market-polygon";
 import { sma, rsi, round2 } from "@/lib/ta";
 import { llmNewsSentiment } from "@/lib/sentiment";
+import { hasLimitRemaining, incrementUsage } from "@/lib/usage";
+import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,8 +80,7 @@ Overall stance: {{BULLISH|BEARISH|NEUTRAL}}; chosen side: {{CALL|PUT}} (single-l
 
 ### News sentiment
 - **Summary:** \{\{sentiment_summary\}\}
-- **Headlines:**  
-\{\{news_bullets\}\}
+- **Headlines:** \{\{news_bullets\}\}
 
 ### TRADE_DETAILS (JSON)
 \`\`\`json
@@ -192,8 +193,6 @@ function spreadCommentFromPct(pct: number | null): "tight" | "moderate" | "wide"
 }
 
 // Small, robust “theoretical” premium estimate if NBBO absent.
-// Not Black-Scholes (no vol surface) — just an intuitive TV add-on.
-// Ensures consistent, positive, non-extreme values across underlyings.
 function theoreticalPremium(
   c: OptionCandidate,
   ltp: number,
@@ -216,7 +215,6 @@ function theoreticalPremium(
 }
 
 // Try to infer a crude IV guess from candidates’ “mark” (mid) vs intrinsic.
-// If no marks, default to 0.28.
 function guessIvFromChain(
   side: "call" | "put",
   ltp: number,
@@ -315,12 +313,23 @@ const insuff = (why: string) =>
 
 export async function POST(req: NextRequest) {
   try {
-    // auth + pro
+    // 1. Auth Check
     const session = await getServerSession(authOptions);
     const email = session?.user?.email ?? null;
     if (!email) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     if (!(await isProByEmail(email)))
       return NextResponse.json({ error: "Subscription required" }, { status: 403 });
+    
+    // 2. Resolve User ID & Check Limits
+    const user = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+    if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
+
+    const hasAccess = await hasLimitRemaining(user.id, "leap");
+    if (!hasAccess) {
+      return NextResponse.json({ 
+        error: "Monthly LEAP signal limit reached. Please upgrade." 
+      }, { status: 403 });
+    }
 
     // input
     const body = await req.json().catch(() => ({}));
@@ -507,14 +516,14 @@ export async function POST(req: NextRequest) {
 
     // Final render
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
-    const user = `TICKER=${ticker}\nPAYLOAD=${JSON.stringify(payload)}`;
+    const userPrompt = `TICKER=${ticker}\nPAYLOAD=${JSON.stringify(payload)}`;
 
     const resp = await withTimeout(
       client.responses.create({
         model: "gpt-5",
         input: [
           { role: "system", content: SYSTEM + "\n\n" + LEAPS_V2_FORMAT },
-          { role: "user", content: user },
+          { role: "user", content: userPrompt },
         ],
         reasoning: { effort: "medium" },
       }),
@@ -532,8 +541,11 @@ export async function POST(req: NextRequest) {
       out.length > 200;
     if (!looksLike) return insuff("LLM note failed heuristic");
 
-    const wantedTitle = `${ticker} Quant Signals LEAP V2 ${date}`;
+    const wantedTitle = `${ticker} JP Signals LEAP V2 ${date}`;
     const normalized = out.replace(/^[^\n]*\n?/, wantedTitle + "\n");
+
+    // 3. Increment Usage (Success Only)
+    await incrementUsage(user.id, "leap");
 
     return new NextResponse(normalized, {
       status: 200,

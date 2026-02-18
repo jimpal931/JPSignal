@@ -8,6 +8,8 @@ import { isProByEmail } from "@/lib/isPro";
 import { getStockSnapshot, getStockAggs } from "@/lib/market-polygon";
 import { sma, rsi, macdSlope, round2 } from "@/lib/ta";
 import { llmNewsSentiment } from "@/lib/sentiment";
+import { hasLimitRemaining, incrementUsage } from "@/lib/usage";
+import { prisma } from "@/lib/prisma"; // Needed to resolve userId from email
 
 // Ensure Node runtime + no CDN caching
 export const runtime = "nodejs";
@@ -44,30 +46,21 @@ Then:
 (2–4 sentences citing one support & one resistance, momentum, volume.)
 
 ### Trade Recommendation
-1. **Entry Price or Range:**  
-   - **Entry Price:** $\{\{entry_low\}\} - $\{\{entry_high\}\} (\{\{ENTRY_TIMING\}\})
-2. **Stop Loss Level:**  
-   - **Stop Loss:** $\{\{stop\}\} (reason)
-3. **Take Profit Level:**  
-   - **Take Profit Level 1:** $\{\{tp1\}\} (label)  
+1. **Entry Price or Range:** - **Entry Price:** $\{\{entry_low\}\} - $\{\{entry_high\}\} (\{\{ENTRY_TIMING\}\})
+2. **Stop Loss Level:** - **Stop Loss:** $\{\{stop\}\} (reason)
+3. **Take Profit Level:** - **Take Profit Level 1:** $\{\{tp1\}\} (label)  
    - **Take Profit Level 2:** $\{\{tp2\}\} (label)  
-   - **Risk-Reward Ratio:**  
-     - PT1: Risk $\{\{risk\}\}/share for a reward of $\{\{reward1\}\} (1:\{\{rr1\}\})
+   - **Risk-Reward Ratio:** - PT1: Risk $\{\{risk\}\}/share for a reward of $\{\{reward1\}\} (1:\{\{rr1\}\})
      - PT2: Risk $\{\{risk\}\}/share for a reward of $\{\{reward2\}\} (1:\{\{rr2\}\})
-4. **Position Size Recommendation:**  
-   - **Position Size:** \{\{pos_size\}\}% of the portfolio (adjust per risk tolerance)
-5. **Confidence Level:**  
-   - **Confidence Level:** \{\{confidence_pct\}\}%
-6. **Key Risks and Trade Rationale:**  
-   - **Key Risks:** \{\{bullets\}\}  
+4. **Position Size Recommendation:** - **Position Size:** \{\{pos_size\}\}% of the portfolio (adjust per risk tolerance)
+5. **Confidence Level:** - **Confidence Level:** \{\{confidence_pct\}\}%
+6. **Key Risks and Trade Rationale:** - **Key Risks:** \{\{bullets\}\}  
    - **Trade Rationale:** \{\{bullets\}\}
-7. **Trade Entry Timing:**  
-   - \{\{ENTRY_TIMING\}\}
+7. **Trade Entry Timing:** - \{\{ENTRY_TIMING\}\}
 
 ### News sentiment
 - **Summary:** \{\{sentiment_summary\}\}
-- **Headlines:**  
-\{\{news_bullets\}\}
+- **Headlines:** \{\{news_bullets\}\}
 
 ### TRADE_DETAILS (JSON Format)
 \`\`\`json
@@ -195,12 +188,23 @@ const insuff = (why: string) =>
 // ---- handler ----
 export async function POST(req: NextRequest) {
   try {
-    // auth + pro
+    // 1. Auth Check
     const session = await getServerSession(authOptions);
     const email = session?.user?.email ?? null;
     if (!email) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     if (!(await isProByEmail(email)))
       return NextResponse.json({ error: "Subscription required" }, { status: 403 });
+
+    // 2. Resolve User ID (if not on session) & Check Limits
+    const user = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+    if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
+
+    const hasAccess = await hasLimitRemaining(user.id, "stock");
+    if (!hasAccess) {
+      return NextResponse.json({ 
+        error: "Monthly limit reached. Please upgrade your plan." 
+      }, { status: 403 });
+    }
 
     // input
     const body = await req.json().catch(() => ({}));
@@ -425,14 +429,14 @@ export async function POST(req: NextRequest) {
 
     // LLM render (strict + timeout)
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
-    const user = `TICKER=${ticker}\nPAYLOAD=${JSON.stringify(payload)}`;
+    const userPrompt = `TICKER=${ticker}\nPAYLOAD=${JSON.stringify(payload)}`;
 
     const resp = await withTimeout(
       client.responses.create({
         model: "gpt-5",
         input: [
           { role: "system", content: SYSTEM + "\n\n" + STOCKS_V2_FORMAT },
-          { role: "user", content: user },
+          { role: "user", content: userPrompt },
         ],
         reasoning: { effort: "medium" },
       }),
@@ -453,6 +457,9 @@ export async function POST(req: NextRequest) {
     // Normalize first-line title to your canonical form
     const wantedTitle = `${ticker} JPSignals Stock Signal ${payload.date}`;
     const normalized = out.replace(/^[^\n]*\n?/, wantedTitle + "\n");
+
+    // 3. Increment Usage (Success Only)
+    await incrementUsage(user.id, "stock");
 
     return new NextResponse(normalized, {
       status: 200,

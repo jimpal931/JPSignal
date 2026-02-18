@@ -9,7 +9,7 @@ export default function AuthButton() {
   const { data, status } = useSession();
   console.log("[AuthButton] got:", data, status);
   return data?.user ? (
-    <button onClick={() => signOut()} className="px-3 py-2 rounded bg-gray-200">
+    <button onClick={() => signOut()} className="px-3 py-2 rounded bg-black-200 text-white">
       Sign out
     </button>
   ) : (

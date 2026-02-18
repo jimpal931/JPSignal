@@ -1,0 +1,94 @@
+// 1. Generator: Standard Client (No preview features needed)
+generator client {
+  provider = "prisma-client-js"
+}
+
+// 2. Datasource: Direct connection string from .env
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/**
+ * ------------------------------
+ * ENUMS
+ * ------------------------------
+ */
+
+enum Plan {
+  BASIC
+  PRO
+  PRO_MAX
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  INACTIVE
+  CANCELED
+  PAST_DUE
+}
+
+/**
+ * ------------------------------
+ * USER MODEL
+ * ------------------------------
+ */
+
+model User {
+  id    String  @id @default(cuid())
+  email String  @unique
+  name  String?
+  image String?
+
+  // Stripe Related
+  stripeCustomerId String?       @unique
+  plan             Plan?         // Nullable because new users might have no plan
+  subscription     Subscription?
+  usage            Usage?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * ------------------------------
+ * SUBSCRIPTION MODEL
+ * ------------------------------
+ */
+
+model Subscription {
+  id String @id @default(cuid())
+
+  user   User   @relation(fields: [userId], references: [id])
+  userId String @unique
+
+  stripeSubscriptionId   String   @unique
+  stripePriceId          String
+  stripeCurrentPeriodEnd DateTime
+
+  status SubscriptionStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * ------------------------------
+ * MONTHLY USAGE MODEL
+ * ------------------------------
+ */
+
+model Usage {
+  id String @id @default(cuid())
+
+  user   User   @relation(fields: [userId], references: [id])
+  userId String @unique
+
+  stockSignalsUsed Int @default(0)
+  leapSignalsUsed  Int @default(0)
+
+  resetAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
