@@ -1,4 +1,3 @@
-// src/app/api/leap-signal-v2/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { z } from "zod";
@@ -9,6 +8,7 @@ import {
   getStockSnapshot,
   getStockAggs,
   getLeapOptionCandidates,
+  getSpecificOptionSnapshot, 
   OptionCandidate,
 } from "@/lib/market-polygon";
 import { sma, rsi, round2 } from "@/lib/ta";
@@ -137,10 +137,6 @@ function withTimeout<T>(p: Promise<T>, ms = 12000, label = "op"): Promise<T> {
   });
 }
 
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
-}
-
 function thirdFriday(year: number, monthIdx: number) {
   const d = new Date(Date.UTC(year, monthIdx, 1));
   while (d.getUTCDay() !== 5) d.setUTCDate(d.getUTCDate() + 1);
@@ -158,7 +154,7 @@ function defaultLeapExpiryIso() {
   return target.toISOString().slice(0, 10);
 }
 
-// --- pricing/selection utilities (no "any", no last trade dependency) ---
+// --- pricing/selection utilities ---
 function midOf(c: OptionCandidate): number | null {
   const bid = c.bid ?? null;
   const ask = c.ask ?? null;
@@ -172,7 +168,7 @@ function priceOf(c: OptionCandidate): { price: number; source: "ask" | "mid" } |
   if (ask != null && isFinite(ask) && ask > 0) return { price: ask, source: "ask" };
   const mid = midOf(c);
   if (mid != null && isFinite(mid) && mid > 0) return { price: mid, source: "mid" };
-  return null; // fall back to theoretical later if needed
+  return null; 
 }
 
 function spreadPct(c: OptionCandidate): number | null {
@@ -363,12 +359,12 @@ export async function POST(req: NextRequest) {
     if (above200) biasScore++;
     if (rsiBull) biasScore++;
     if (!above50) biasScore--;
-    if (!above200) biasScore--;
+    if (above200) biasScore--;
     if (rsiBear) biasScore--;
     const longTermBias: "bullish" | "bearish" | "neutral" =
       biasScore >= 1 ? "bullish" : biasScore <= -1 ? "bearish" : "neutral";
 
-    // news sentiment (shared with Stocks route)
+    // news sentiment
     const sentiment = await llmNewsSentiment(ticker);
     const newsBullets =
       sentiment.headlines
@@ -376,7 +372,7 @@ export async function POST(req: NextRequest) {
         .map((h) => `- ${h.title}${h.date ? ` (${h.date})` : ""}`)
         .join("\n") || "- No recent, reliable headlines.";
 
-    // options: fetch both sides for a target LEAP expiry
+    // options: fetch both sides
     const targetExpiry = defaultLeapExpiryIso();
     const calls = await withTimeout(getLeapOptionCandidates(ticker, targetExpiry, "call"), 12000, "options:calls").catch(
       () => [] as OptionCandidate[]
@@ -391,7 +387,7 @@ export async function POST(req: NextRequest) {
 
     if (!bestCall && !bestPut) return insuff("options_unpriced");
 
-    // Choose side based on long-term bias, with fallback
+    // Choose side
     let chosen: OptionCandidate | null = null;
     let chosenSide: "call" | "put" | null = null;
     if (longTermBias === "bullish") {
@@ -401,12 +397,12 @@ export async function POST(req: NextRequest) {
       chosen = bestPut ?? bestCall;
       chosenSide = bestPut ? "put" : bestCall ? "call" : null;
     } else {
-      // neutral → pick whichever exists with better liquidity (higher OI, tighter spread)
+      // neutral logic
       const scoreLiquidity = (c: OptionCandidate | null) => {
         if (!c) return -Infinity;
         const oi = c.oi ?? 0;
         const sp = spreadPct(c);
-        const spreadScore = sp == null ? -5 : -sp; // tighter is better
+        const spreadScore = sp == null ? -5 : -sp;
         return oi * 0.001 + spreadScore;
       };
       const sCall = scoreLiquidity(bestCall);
@@ -425,7 +421,21 @@ export async function POST(req: NextRequest) {
 
     if (!chosen || !chosenSide) return insuff("options_unpriced");
 
-    // Premium: prefer ask→mid, else theoretical
+    // --- NEW: RE-FETCH DATA IF MISSING ---
+    // If our chosen candidate has no Bid/Ask/OI, fetch it specifically.
+    if (chosen.bid == null || chosen.oi == null) {
+      console.log(`[Sniper] Fetching specific snapshot for ${chosen.contract}`);
+      const freshData = await getSpecificOptionSnapshot(chosen.contract);
+      if (freshData) {
+        // Merge the fresh data into our chosen object
+        chosen = { ...chosen, ...freshData };
+        // Update references
+        if (chosenSide === "call" && bestCall) Object.assign(bestCall, freshData);
+        if (chosenSide === "put" && bestPut) Object.assign(bestPut, freshData);
+      }
+    }
+    // -------------------------------------
+
     const ivGuessCall = guessIvFromChain("call", ltp, calls);
     const ivGuessPut = guessIvFromChain("put", ltp, puts);
     const ivGuess = chosenSide === "call" ? ivGuessCall : ivGuessPut;
@@ -445,7 +455,6 @@ export async function POST(req: NextRequest) {
 
     const { date, ts } = nowNy();
 
-    // Build payload with BOTH candidates (for transparency) and chosen fields
     const payload = {
       ticker,
       date,
@@ -507,20 +516,18 @@ export async function POST(req: NextRequest) {
       entry_timing: "open",
       confidence_decimal: confidence,
 
-      // sentiment for the template
       sentiment_label: sentiment.label,
       sentiment_score: round2(sentiment.score),
       sentiment_summary: sentiment.summary,
       news_bullets: newsBullets,
     };
 
-    // Final render
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
     const userPrompt = `TICKER=${ticker}\nPAYLOAD=${JSON.stringify(payload)}`;
 
     const resp = await withTimeout(
       client.responses.create({
-        model: "gpt-5",
+        model: "gpt-5", // or "gpt-4o"
         input: [
           { role: "system", content: SYSTEM + "\n\n" + LEAPS_V2_FORMAT },
           { role: "user", content: userPrompt },
@@ -541,10 +548,9 @@ export async function POST(req: NextRequest) {
       out.length > 200;
     if (!looksLike) return insuff("LLM note failed heuristic");
 
-    const wantedTitle = `${ticker} JP Signals LEAP V2 ${date}`;
+    const wantedTitle = `${ticker} JP Signals LEAP V3 ${date}`;
     const normalized = out.replace(/^[^\n]*\n?/, wantedTitle + "\n");
 
-    // 3. Increment Usage (Success Only)
     await incrementUsage(user.id, "leap");
 
     return new NextResponse(normalized, {
