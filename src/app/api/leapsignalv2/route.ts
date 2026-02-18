@@ -8,7 +8,7 @@ import {
   getStockSnapshot,
   getStockAggs,
   getLeapOptionCandidates,
-  getSpecificOptionSnapshot, 
+  getSpecificOptionSnapshot,
   OptionCandidate,
 } from "@/lib/market-polygon";
 import { sma, rsi, round2 } from "@/lib/ta";
@@ -24,7 +24,7 @@ const inSchema = z.object({
   ticker: z.string().regex(/^[A-Z.\-]{1,10}$/i).transform((s) => s.toUpperCase()),
 });
 
-// ---- model prompt (kept strict) ----
+// ---- model prompt ----
 const SYSTEM = `You are “JP Signals — LEAP V2 (Options Auto-Fill)”.
 
 Goal: Given a ticker and TWO precomputed LEAP candidates (one CALL, one PUT) plus underlying context, produce a single-page LEAP trading note. You must CHOOSE either the CALL or the PUT and fill out one final trade. Output only the note—no extra commentary, no links, no images.
@@ -46,7 +46,7 @@ If numbers are missing, the calling code will return “INSUFFICIENT_DATA”.`.t
 const LEAPS_V2_FORMAT = String.raw`
 OUTPUT FORMAT (must match exactly; no extra lines)
 
-{{TICKER}} JP Signals LEAP V3 {{DATE}}
+{{TICKER}} AInsight Signals LEAP V3 {{DATE}}
 {{TICKER}} LEAP Analysis Summary ({{DATE}})
 
 ### Summary (Model)
@@ -154,24 +154,27 @@ function defaultLeapExpiryIso() {
   return target.toISOString().slice(0, 10);
 }
 
-// --- pricing/selection utilities ---
+// --- pricing/selection utilities (FIXED FOR STARTER PLAN) ---
+
+// FIX: Trust 'mid' directly because it contains Last Trade Price on Starter Plan
 function midOf(c: OptionCandidate): number | null {
-  const bid = c.bid ?? null;
-  const ask = c.ask ?? null;
-  if (bid == null || ask == null || !isFinite(bid) || !isFinite(ask) || bid <= 0 || ask <= 0)
-    return null;
-  return (bid + ask) / 2;
+  if (c.mid != null && isFinite(c.mid) && c.mid > 0) return c.mid;
+  return null;
 }
 
+// FIX: Check 'mid' directly
 function priceOf(c: OptionCandidate): { price: number; source: "ask" | "mid" } | null {
   const ask = c.ask ?? null;
   if (ask != null && isFinite(ask) && ask > 0) return { price: ask, source: "ask" };
-  const mid = midOf(c);
-  if (mid != null && isFinite(mid) && mid > 0) return { price: mid, source: "mid" };
+  
+  const m = midOf(c);
+  if (m != null && isFinite(m) && m > 0) return { price: m, source: "mid" };
+  
   return null; 
 }
 
 function spreadPct(c: OptionCandidate): number | null {
+  // On starter plan, we likely have no bid/ask, so spread is unknown/null
   const bid = c.bid ?? null;
   const ask = c.ask ?? null;
   if (bid == null || ask == null || !isFinite(bid) || !isFinite(ask) || bid <= 0 || ask <= 0)
@@ -188,7 +191,6 @@ function spreadCommentFromPct(pct: number | null): "tight" | "moderate" | "wide"
   return "wide";
 }
 
-// Small, robust “theoretical” premium estimate if NBBO absent.
 function theoreticalPremium(
   c: OptionCandidate,
   ltp: number,
@@ -199,18 +201,16 @@ function theoreticalPremium(
     0,
     isCall ? ltp - c.strike : c.strike - ltp
   );
-  // Time value scaled by LTP and sqrt(T) with a dampener
+  // Time value scaled by LTP and sqrt(T)
   const T = Math.max(
     1 / 365,
     (Date.parse(c.expiry + "T20:00:00Z") - Date.now()) / (365 * 24 * 3600 * 1000)
   );
   const tv = 0.25 * ltp * Math.sqrt(T) * Math.max(0.15, Math.min(0.60, ivGuess));
-  // cap TV so deep ITM/OTM doesn't explode
   const tvCapped = Math.min(tv, Math.max(2, 0.15 * Math.max(ltp, c.strike)));
   return round2(intrinsic + tvCapped);
 }
 
-// Try to infer a crude IV guess from candidates’ “mark” (mid) vs intrinsic.
 function guessIvFromChain(
   side: "call" | "put",
   ltp: number,
@@ -230,13 +230,10 @@ function guessIvFromChain(
 
   if (!marks.length) return 0.28;
   const avg = marks.reduce((a, b) => a + (b.tv / Math.sqrt(b.T)), 0) / marks.length;
-  // invert tv ≈ k * sqrt(T) * LTP * IV  → IV ≈ tv / (k * LTP)
-  // with k≈0.25 (same as theoreticalPremium)
   const iv = avg / (0.25 * Math.max(1, ltp));
   return Math.max(0.15, Math.min(0.60, iv));
 }
 
-// target 0.60–0.80 calls, -0.80–-0.60 puts (relax if empty). No "any".
 function pickBestBySide(
   side: "call" | "put",
   ltp: number,
@@ -247,20 +244,23 @@ function pickBestBySide(
   if (!pool.length) return null;
 
   const score = (c: OptionCandidate, pivotDelta: number | null) => {
+    // For Starter plan, we won't have spread info, so default to 3 (neutral)
     const sp = spreadPct(c);
-    const spreadScore = sp == null ? 3 : Math.min(10, sp / 10); // 0..10; unknown ~3
-    const oiScore = -(c.oi ?? 0) / 5000; // prefer higher OI
-    const hasAsk = c.ask != null && isFinite(c.ask) && (c.ask as number) > 0;
-    const askBonus = hasAsk ? -0.25 : 0;
+    const spreadScore = sp == null ? 3 : Math.min(10, sp / 10); 
+    const oiScore = -(c.oi ?? 0) / 5000;
+    
+    // Check if we have a price (mid > 0)
+    const hasPrice = (c.mid ?? 0) > 0;
+    const priceBonus = hasPrice ? -0.25 : 0;
 
     if (pivotDelta != null && c.delta != null && isFinite(c.delta)) {
       const deltaScore = Math.abs((c.delta as number) - pivotDelta);
-      return deltaScore + askBonus + spreadScore + oiScore;
+      return deltaScore + priceBonus + spreadScore + oiScore;
     } else {
-      const bias = side === "call" ? -0.02 : +0.02; // slight ITM bias
+      const bias = side === "call" ? -0.02 : +0.02;
       const target = ltp * (1 + bias);
       const strikeScore = Math.abs(c.strike - target) / Math.max(1, ltp);
-      return strikeScore + askBonus + spreadScore + oiScore;
+      return strikeScore + priceBonus + spreadScore + oiScore;
     }
   };
 
@@ -335,12 +335,15 @@ export async function POST(req: NextRequest) {
 
     // underlying snapshot for LTP
     const snap = await withTimeout(getStockSnapshot(ticker), 8000, "polygon:snapshot").catch(() => null);
-    const day = snap?.ticker?.day,
-      prev = snap?.ticker?.prevDay;
-    const bid = snap?.ticker?.lastQuote?.bp,
-      ask = snap?.ticker?.lastQuote?.ap;
-    const nbboMid = bid && ask ? (bid + ask) / 2 : undefined;
-    const ltp = nbboMid ?? day?.c ?? prev?.c ?? day?.o ?? prev?.o ?? null;
+    
+    // FIX: Using only available fields from StockSnapshot (Starter Plan compatible)
+    const day = snap?.ticker?.day;
+    const prev = snap?.ticker?.prevDay;
+    const lastTradePrice = snap?.ticker?.lastTrade?.p; // <--- Correct way to get price on Starter Plan
+
+    // Logic: Try Last Trade -> Day Close -> Prev Close -> etc.
+    const ltp = lastTradePrice ?? day?.c ?? prev?.c ?? day?.o ?? prev?.o ?? null;
+    
     if (!ltp || !day || !prev) return insuff("snapshot missing ltp/day/prev");
 
     // long-term bias from ~1y bars
@@ -421,15 +424,13 @@ export async function POST(req: NextRequest) {
 
     if (!chosen || !chosenSide) return insuff("options_unpriced");
 
-    // --- NEW: RE-FETCH DATA IF MISSING ---
-    // If our chosen candidate has no Bid/Ask/OI, fetch it specifically.
-    if (chosen.bid == null || chosen.oi == null) {
+    // --- RE-FETCH DATA IF MISSING ---
+    // On Starter plan, check if mid (last trade) or OI is missing
+    if (chosen.mid == null || chosen.oi == null) {
       console.log(`[Sniper] Fetching specific snapshot for ${chosen.contract}`);
       const freshData = await getSpecificOptionSnapshot(chosen.contract);
       if (freshData) {
-        // Merge the fresh data into our chosen object
         chosen = { ...chosen, ...freshData };
-        // Update references
         if (chosenSide === "call" && bestCall) Object.assign(bestCall, freshData);
         if (chosenSide === "put" && bestPut) Object.assign(bestPut, freshData);
       }
@@ -475,8 +476,9 @@ export async function POST(req: NextRequest) {
             expiry: bestCall.expiry,
             strike: round2(bestCall.strike),
             right: "C" as const,
-            bid: bestCall.bid != null ? round2(bestCall.bid) : null,
-            ask: bestCall.ask != null ? round2(bestCall.ask) : null,
+            // Pass null for bid/ask, pass mid (Last Trade)
+            bid: null,
+            ask: null,
             mid: midOf(bestCall) != null ? round2(midOf(bestCall) as number) : null,
             oi: bestCall.oi ?? null,
             volume: bestCall.volume ?? null,
@@ -491,8 +493,8 @@ export async function POST(req: NextRequest) {
             expiry: bestPut.expiry,
             strike: round2(bestPut.strike),
             right: "P" as const,
-            bid: bestPut.bid != null ? round2(bestPut.bid) : null,
-            ask: bestPut.ask != null ? round2(bestPut.ask) : null,
+            bid: null,
+            ask: null,
             mid: midOf(bestPut) != null ? round2(midOf(bestPut) as number) : null,
             oi: bestPut.oi ?? null,
             volume: bestPut.volume ?? null,

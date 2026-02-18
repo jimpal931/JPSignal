@@ -1,4 +1,3 @@
-// src/app/api/signal-v2/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { z } from "zod";
@@ -9,9 +8,8 @@ import { getStockSnapshot, getStockAggs } from "@/lib/market-polygon";
 import { sma, rsi, macdSlope, round2 } from "@/lib/ta";
 import { llmNewsSentiment } from "@/lib/sentiment";
 import { hasLimitRemaining, incrementUsage } from "@/lib/usage";
-import { prisma } from "@/lib/prisma"; // Needed to resolve userId from email
+import { prisma } from "@/lib/prisma"; 
 
-// Ensure Node runtime + no CDN caching
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -24,7 +22,7 @@ const inSchema = z.object({
 });
 
 // ---- system prompt + format ----
-const SYSTEM = `You are “JP Signals — STOCKS V3 (Realtime Auto-Fill)”.
+const SYSTEM = `You are “AInsight Signals — STOCKS V3 (Realtime Auto-Fill)”.
 Goal: When the user gives only a ticker (e.g., “TICKER = AMD”), render a single-page trading note in the exact STOCKS V2 layout. Output only the note—no extra commentary, no links, no images.
 
 HARD REQUIREMENTS
@@ -82,7 +80,7 @@ Then:
 \`\`\`
 `;
 
-// ---- helpers (kept intact) ----
+// ---- helpers ----
 function nowNy() {
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
@@ -94,7 +92,7 @@ function nowNy() {
     second: "2-digit",
     hour12: false,
   });
-  const s = fmt.format(new Date()); // "MM/DD/YYYY, HH:MM:SS"
+  const s = fmt.format(new Date()); 
   const [mdy, hms] = s.split(", ");
   const [m, d, y] = mdy.split("/");
   return { date: `${y}-${m}-${d}`, ts: `${y}-${m}-${d} ${hms}` };
@@ -125,8 +123,8 @@ function nowPartsNy() {
 
 function isRegularTradingHoursNy(): boolean {
   const { mins, dow } = nowPartsNy();
-  if (dow === 0 || dow === 6) return false; // weekend
-  return mins >= 9 * 60 + 30 && mins < 16 * 60; // 09:30–16:00 ET
+  if (dow === 0 || dow === 6) return false; 
+  return mins >= 9 * 60 + 30 && mins < 16 * 60; 
 }
 
 function isFirst15MinNy(): boolean {
@@ -136,7 +134,6 @@ function isFirst15MinNy(): boolean {
 
 function isPostCloseNy(): boolean {
   const { mins } = nowPartsNy();
-  // after 16:05 ET or before 09:30 ET → treat as outside cash session
   return mins >= 16 * 60 + 5 || mins < 9 * 60 + 30;
 }
 
@@ -145,9 +142,7 @@ function clamp(n: number, lo: number, hi: number) {
 }
 type EntryTiming = "market_open" | "intraday_breakout" | "intraday_breakdown";
 function entryTimingNy(direction: "long" | "short"): EntryTiming {
-  // Outside RTH or first 15 minutes → wait for market open
   if (!isRegularTradingHoursNy() || isFirst15MinNy()) return "market_open";
-  // During RTH: breakout for longs, breakdown for shorts
   return direction === "long" ? "intraday_breakout" : "intraday_breakdown";
 }
 
@@ -212,23 +207,23 @@ export async function POST(req: NextRequest) {
     if (!parsed.success) return NextResponse.json({ error: "Bad input" }, { status: 400 });
     const ticker = parsed.data.ticker;
 
-    // 1) Single-ticker snapshot
+    // 1) Single-ticker snapshot (STARTER PLAN FIX)
     const snap = await withTimeout(getStockSnapshot(ticker)).catch(() => null);
     const day = snap?.ticker?.day;
     const prev = snap?.ticker?.prevDay;
+    
+    // FIX: Only use fields available on Starter Plan (lastTrade, day, prevDay)
+    // Removed: lastQuote (bid/ask) because your plan doesn't support it
     const lastTrade = snap?.ticker?.lastTrade?.p;
-    const bid = snap?.ticker?.lastQuote?.bp;
-    const ask = snap?.ticker?.lastQuote?.ap;
-    const nbboMid = bid && ask ? (bid + ask) / 2 : undefined;
+    
     // Prefer today's close over previous close; clamp to today's close after RTH
-    let ltp = nbboMid ?? lastTrade ?? day?.c ?? prev?.c ?? day?.o;
+    let ltp = lastTrade ?? day?.c ?? prev?.c ?? day?.o;
     if (isPostCloseNy() && day?.c) {
       ltp = day.c;
     }
 
     if (DEBUG) {
       console.log("[signal-v2] price sources", {
-        nbboMid,
         lastTrade,
         dayC: day?.c,
         prevC: prev?.c,
@@ -267,7 +262,7 @@ export async function POST(req: NextRequest) {
     const hi52 = Math.max(...closes);
     const lo52 = Math.min(...closes);
 
-    // Volume context (cap extreme ratios; handle partial days)
+    // Volume context
     const lastVol = vols.length ? vols[vols.length - 1] : 0;
     const avg20Vol =
       vols.slice(-20).reduce((a, b) => a + b, 0) /
@@ -297,7 +292,7 @@ export async function POST(req: NextRequest) {
     const entryHigh = direction === "long" ? round2(ltp + w) : ltp;
     const midpoint = round2((entryLow + entryHigh) / 2);
 
-    // Supports / Resistances (unique + sorted)
+    // Supports / Resistances
     const supportCandidates = [ma10, ma20, ma50, ma200, priorLow].filter(
       (x): x is number => typeof x === "number"
     );
@@ -327,8 +322,8 @@ export async function POST(req: NextRequest) {
       tp1 = below.length ? Math.max(...below) : round2(midpoint * 0.99);
     }
 
-    // Normalize risk to avoid zero/tiny distances
-    const MIN_RISK = round2(Math.max(ltp * 0.002, 0.05)); // ≥0.2% or 5¢
+    // Normalize risk
+    const MIN_RISK = round2(Math.max(ltp * 0.002, 0.05)); 
     let risk = round2(Math.abs(midpoint - stop));
     if (risk < MIN_RISK) {
       stop =
@@ -342,7 +337,7 @@ export async function POST(req: NextRequest) {
         ? round2(midpoint + 3 * risk)
         : round2(midpoint - 3 * risk);
 
-    // Confidence & position size
+    // Confidence
     let conf = 60;
     if (
       rsi14 != null &&
@@ -366,13 +361,13 @@ export async function POST(req: NextRequest) {
 
     const { date, ts } = nowNy();
 
-    // ---- News sentiment (added) ----
+    // ---- News sentiment ----
     const sentiment = await llmNewsSentiment(ticker);
     const newsBullets =
       sentiment.headlines.slice(0, 5).map(h => `- ${h.title}${h.date ? ` (${h.date})` : ""}`).join("\n") ||
       "- No recent, reliable headlines.";
 
-    // Build payload with DEFINITE numbers
+    // Build payload
     const payload = {
       ticker,
       date,
@@ -381,13 +376,10 @@ export async function POST(req: NextRequest) {
       dayHigh: round2(dayHigh),
       dayLow: round2(dayLow),
       prevClose: round2(prevClose),
-
       priorHigh: round2(priorHigh),
       priorLow: round2(priorLow),
-
       hi52: round2(hi52),
       lo52: round2(lo52),
-
       ma10: ma10 != null ? round2(ma10) : null,
       ma20: ma20 != null ? round2(ma20) : null,
       ma50: ma50 != null ? round2(ma50) : null,
@@ -395,16 +387,13 @@ export async function POST(req: NextRequest) {
       rsi14: rsi14 != null ? Math.round(rsi14 * 10) / 10 : null,
       macdSlope: macdS != null ? Math.round(macdS * 10000) / 10000 : null,
       volRatio: volRatio != null ? Math.round(volRatio * 100) / 100 : null,
-
       direction,
       entry_low: round2(entryLow),
       entry_high: round2(entryHigh),
       ENTRY_TIMING: entryTimingNy(direction),
-
       stop: round2(stop),
       tp1: round2(tp1),
       tp2: round2(tp2),
-
       risk,
       reward1: round2(Math.abs(tp1 - midpoint)),
       reward2: round2(Math.abs(tp2 - midpoint)),
@@ -414,20 +403,17 @@ export async function POST(req: NextRequest) {
       pos_size: posSize,
       confidence_pct: Math.round(conf),
       confidence_decimal: Math.round(conf) / 100,
-
-      // sentiment fields used by the template
       sentiment_label: sentiment.label,
       sentiment_score: round2(sentiment.score),
       sentiment_summary: sentiment.summary,
       news_bullets: newsBullets,
     };
 
-    // final guard
     if (!isFinite(payload.ltp)) {
       return insuff("ltp not finite");
     }
 
-    // LLM render (strict + timeout)
+    // LLM render
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
     const userPrompt = `TICKER=${ticker}\nPAYLOAD=${JSON.stringify(payload)}`;
 
@@ -454,11 +440,9 @@ export async function POST(req: NextRequest) {
       return insuff("LLM note failed heuristic");
     }
 
-    // Normalize first-line title to your canonical form
     const wantedTitle = `${ticker} JPSignals Stock Signal ${payload.date}`;
     const normalized = out.replace(/^[^\n]*\n?/, wantedTitle + "\n");
 
-    // 3. Increment Usage (Success Only)
     await incrementUsage(user.id, "stock");
 
     return new NextResponse(normalized, {

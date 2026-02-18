@@ -19,11 +19,10 @@ async function jget<T>(path: string) {
   return (await r.json()) as T;
 }
 
-/** 1) Single Ticker Snapshot */
+/** 1) Stock Snapshot */
 export type StockSnapshot = {
   ticker?: {
     lastTrade?: { p?: number };
-    lastQuote?: { bp?: number; ap?: number };
     day?: { o?: number; h?: number; l?: number; c?: number; v?: number };
     prevDay?: { o?: number; h?: number; l?: number; c?: number; v?: number };
   };
@@ -33,7 +32,7 @@ export async function getStockSnapshot(ticker: string): Promise<StockSnapshot> {
   return jget<StockSnapshot>(`/v2/snapshot/locale/us/markets/stocks/tickers/${encodeURIComponent(ticker)}`);
 }
 
-/** 2) Daily Aggs */
+/** 2) Stock Aggs */
 export async function getStockAggs(ticker: string, days = 260) {
   const to = new Date();
   const from = new Date(Date.now() - days * 24 * 3600 * 1000);
@@ -48,7 +47,7 @@ export async function getStockAggs(ticker: string, days = 260) {
   }));
 }
 
-// ---------- Options (Polygon) ----------
+// ---------- Options ----------
 export type OptionCandidate = {
   contract: string;
   expiry: string;
@@ -63,11 +62,12 @@ export type OptionCandidate = {
   iv?: number | null;
 };
 
-// Snapshot Item Shape
+// FIX: Updated Type Definition for Starter Plan
 type SnapshotItem = {
   ticker: string;
   day?: { v?: number };
-  last_quote?: { a?: number; b?: number };
+  // Starter plan often omits last_quote entirely, so we rely on last_trade
+  last_trade?: { p?: number; s?: number; t?: number }; 
   open_interest?: number;
   greeks?: { delta?: number; theta?: number; gamma?: number; vega?: number };
   implied_volatility?: number;
@@ -84,7 +84,7 @@ export async function getLeapOptionCandidates(
 ): Promise<OptionCandidate[]> {
   const right: "C" | "P" = side === "call" ? "C" : "P";
 
-  // 1. Get Contract List (Reference)
+  // 1. Get Contract List
   const ref = await jget<{
     results?: Array<{
       ticker: string;
@@ -100,7 +100,7 @@ export async function getLeapOptionCandidates(
   const rawContracts = ref.results ?? [];
   if (rawContracts.length === 0) return [];
 
-  // 2. Try Bulk Snapshot (might be empty/partial)
+  // 2. Get Snapshot (Delayed)
   let snapMap = new Map<string, SnapshotItem>();
   try {
     const snapshot = await jget<UniversalSnapshot>(
@@ -109,29 +109,27 @@ export async function getLeapOptionCandidates(
     );
     (snapshot.results ?? []).forEach(s => snapMap.set(s.ticker, s));
   } catch (e) {
-    // Ignore bulk fetch error, we will return partials and fill gaps later if needed
-    console.warn("Bulk snapshot failed, falling back to basic contract list", e);
+    console.warn("Bulk snapshot failed", e);
   }
 
   // 3. Merge
   return rawContracts
     .map(r => {
       const snap = snapMap.get(r.ticker);
-      const bid = snap?.last_quote?.b ?? null;
-      const ask = snap?.last_quote?.a ?? null;
-      // Ensure strict number check
-      const mid = (typeof bid === 'number' && typeof ask === 'number') 
-        ? (bid + ask) / 2 
-        : null;
+      
+      // STARTER PLAN FIX: 
+      // We ignore Bid/Ask because the plan doesn't provide them.
+      // We strictly use Last Trade Price (p) as the "mid" proxy.
+      const tradePrice = snap?.last_trade?.p ?? null;
       
       return {
         contract: r.ticker,
         expiry: r.expiration_date,
         strike: r.strike_price,
         right,
-        bid,
-        ask,
-        mid,
+        bid: null,       // Not available on Starter
+        ask: null,       // Not available on Starter
+        mid: tradePrice, // Use Last Trade as the "Price"
         oi: snap?.open_interest ?? null,
         volume: snap?.day?.v ?? null,
         delta: snap?.greeks?.delta ?? null,
@@ -154,22 +152,10 @@ export async function getOptionExpiries(ticker: string): Promise<string[]> {
 }
 
 /**
- * NEW: Fetch a single contract's snapshot to fill in gaps.
- * This is more reliable than bulk snapshots for specific tickers.
+ * Sniper Fetch for specific contract (Starter Plan Version)
  */
 export async function getSpecificOptionSnapshot(contractTicker: string): Promise<Partial<OptionCandidate> | null> {
   try {
-    // Note: The endpoint is /v3/snapshot/options/{underlying}/{contract}
-    // We need to parse underlying from contract (e.g. O:GOOGL...) or just pass the contract if API supports it.
-    // Actually, Polygon V3 Universal Snapshot supports passing just the option ticker in the path for "Option Contract" endpoint
-    // Endpoint: /v3/snapshot/options/{underlyingAsset}/{optionContract}
-    
-    // Extract underlying from ticker string (e.g. "O:GOOGL26..." -> "GOOGL")
-    // Or simpler: Assuming 'underlying' is known by the caller, but here we can try to guess or use the universal lookup.
-    
-    // We will use the direct contract snapshot URL if possible.
-    // For universal snapshot, passing the contract ticker as the 2nd param works.
-    // Parse underlying:
     const match = contractTicker.match(/O:([A-Z]+)\d{6}[CP]/);
     if (!match) return null;
     const underlying = match[1];
@@ -180,14 +166,13 @@ export async function getSpecificOptionSnapshot(contractTicker: string): Promise
 
     if (!snap) return null;
 
-    const bid = snap.last_quote?.b ?? null;
-    const ask = snap.last_quote?.a ?? null;
-    const mid = (typeof bid === 'number' && typeof ask === 'number') ? (bid + ask) / 2 : null;
+    // STARTER PLAN FIX: Use Last Trade
+    const tradePrice = snap.last_trade?.p ?? null;
 
     return {
-      bid,
-      ask,
-      mid,
+      bid: null,
+      ask: null,
+      mid: tradePrice,
       oi: snap.open_interest ?? null,
       volume: snap.day?.v ?? null,
       delta: snap.greeks?.delta ?? null,
