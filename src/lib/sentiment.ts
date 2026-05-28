@@ -75,13 +75,13 @@ Return a JSON object with:
 
     // 3. Call OpenAI (using gpt-5-mini)
     const completion = await client.chat.completions.create({
-      model: "gpt-5-mini",
+      model: "gpt-5.4-mini",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: headlinesText },
       ],
       response_format: { type: "json_object" },
-      temperature: 0.2,
+      temperature: 1,
     });
 
     const content = completion.choices[0]?.message?.content;

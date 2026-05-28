@@ -207,19 +207,27 @@ export async function POST(req: NextRequest) {
     if (!parsed.success) return NextResponse.json({ error: "Bad input" }, { status: 400 });
     const ticker = parsed.data.ticker;
 
-    // 1) Single-ticker snapshot (STARTER PLAN FIX)
+    // 1) Pull ~1y daily aggregates early to serve as our absolute weekend/holiday fallback source
+    const bars = await withTimeout(getStockAggs(ticker, 260)).catch(() => []);
+    if (!bars.length) {
+      return insuff("no 1y bars");
+    }
+    const closes = bars.map((b) => b.c);
+    const vols = bars.map((b) => b.v);
+    const lastHistoricalClose = closes[closes.length - 1];
+
+    // 2) Single-ticker snapshot (STARTER PLAN FIX)
     const snap = await withTimeout(getStockSnapshot(ticker)).catch(() => null);
-    const day = snap?.ticker?.day;
-    const prev = snap?.ticker?.prevDay;
+    const day = snap?.ticker?.day ?? null;
+    const prev = snap?.ticker?.prevDay ?? null;
+    const lastTrade = snap?.ticker?.lastTrade?.p ?? null;
     
-    // FIX: Only use fields available on Starter Plan (lastTrade, day, prevDay)
-    // Removed: lastQuote (bid/ask) because your plan doesn't support it
-    const lastTrade = snap?.ticker?.lastTrade?.p;
+    // Fallback hierarchy for Last Traded Price (LTP)
+    let ltp = lastTrade ?? day?.c ?? prev?.c ?? day?.o ?? lastHistoricalClose;
     
-    // Prefer today's close over previous close; clamp to today's close after RTH
-    let ltp = lastTrade ?? day?.c ?? prev?.c ?? day?.o;
-    if (isPostCloseNy() && day?.c) {
-      ltp = day.c;
+    // Force historical closing parameters if running during pre/post market hours, weekends, or holidays
+    if ((isPostCloseNy() || !isRegularTradingHoursNy()) && lastHistoricalClose) {
+      ltp = lastHistoricalClose;
     }
 
     if (DEBUG) {
@@ -227,28 +235,21 @@ export async function POST(req: NextRequest) {
         lastTrade,
         dayC: day?.c,
         prevC: prev?.c,
+        lastHistoricalClose,
         finalLtp: ltp,
       });
     }
 
-    if (!ltp || !day || !prev) {
-      return insuff("snapshot missing ltp/day/prev");
+    if (!ltp) {
+      return insuff("snapshot and fallback missing ltp");
     }
 
-    // definite day/prior values
-    const dayHigh = day.h ?? day.c ?? ltp;
-    const dayLow = day.l ?? day.c ?? ltp;
-    const prevClose = prev.c ?? day.o ?? ltp;
-    const priorHigh = prev.h ?? prev.c ?? ltp;
-    const priorLow = prev.l ?? prev.c ?? ltp;
-
-    // 2) ~1y daily aggs
-    const bars = await withTimeout(getStockAggs(ticker, 260)).catch(() => []);
-    if (!bars.length) {
-      return insuff("no 1y bars");
-    }
-    const closes = bars.map((b) => b.c);
-    const vols = bars.map((b) => b.v);
+    // Defensively handle session extreme parameters via optional chaining and aggregate indexing
+    const dayHigh = day?.h ?? day?.c ?? ltp;
+    const dayLow = day?.l ?? day?.c ?? ltp;
+    const prevClose = prev?.c ?? bars[bars.length - 2]?.c ?? day?.o ?? ltp;
+    const priorHigh = prev?.h ?? prev?.c ?? ltp;
+    const priorLow = prev?.l ?? prev?.c ?? ltp;
 
     // Indicators
     const ma10 = sma(closes, 10);
@@ -419,7 +420,7 @@ export async function POST(req: NextRequest) {
 
     const resp = await withTimeout(
       client.responses.create({
-        model: "gpt-5.2",
+        model: "gpt-5.4",
         input: [
           { role: "system", content: SYSTEM + "\n\n" + STOCKS_V2_FORMAT },
           { role: "user", content: userPrompt },
@@ -440,7 +441,7 @@ export async function POST(req: NextRequest) {
       return insuff("LLM note failed heuristic");
     }
 
-    const wantedTitle = `${ticker} AInsght Stock Signal ${payload.date}`;
+    const wantedTitle = `${ticker} AInsight Stock Signal ${payload.date}`;
     const normalized = out.replace(/^[^\n]*\n?/, wantedTitle + "\n");
 
     await incrementUsage(user.id, "stock");

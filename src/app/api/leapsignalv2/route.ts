@@ -11,7 +11,6 @@ import {
   getSpecificOptionSnapshot,
   OptionCandidate,
 } from "@/lib/market-polygon";
-// Added macdSlope here to run the stock-signal logic!
 import { sma, rsi, macdSlope, round2 } from "@/lib/ta";
 import { llmNewsSentiment } from "@/lib/sentiment";
 import { hasLimitRemaining, incrementUsage } from "@/lib/usage";
@@ -111,6 +110,29 @@ function nowNy() {
   return { date: `${y}-${m}-${d}`, ts: `${y}-${m}-${d} ${hms}` };
 }
 
+function nowPartsNy() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const hh = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  const dowStr = parts.find((p) => p.type === "weekday")?.value ?? "Mon";
+  const dowMap: Record<string, number> = {
+    Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+  };
+  return { mins: hh * 60 + mm, dow: dowMap[dowStr] ?? 1 };
+}
+
+function isRegularTradingHoursNy(): boolean {
+  const { mins, dow } = nowPartsNy();
+  if (dow === 0 || dow === 6) return false; 
+  return mins >= 9 * 60 + 30 && mins < 16 * 60; 
+}
+
 function withTimeout<T>(p: Promise<T>, ms = 12000, label = "op"): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`timeout:${label}`)), ms);
@@ -138,21 +160,19 @@ function defaultLeapExpiryIso() {
   return target.toISOString().slice(0, 10);
 }
 
-// --- NEW: Calculate Actual Historical Volatility (HV) ---
 function calculateHV(closes: number[]): number {
-  if (closes.length < 21) return 0.35; // Default if not enough data
+  if (closes.length < 21) return 0.35; 
   const returns = [];
   for (let i = 1; i < closes.length; i++) {
     returns.push(Math.log(closes[i] / closes[i - 1]));
   }
-  const recent = returns.slice(-20); // Last 20 trading days
+  const recent = returns.slice(-20); 
   const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
   const variance = recent.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (recent.length - 1);
   const dailyStdDev = Math.sqrt(variance);
-  return dailyStdDev * Math.sqrt(252); // Annualized volatility
+  return dailyStdDev * Math.sqrt(252); 
 }
 
-// --- pricing/selection utilities ---
 function midOf(c: OptionCandidate): number | null {
   if (c.mid != null && isFinite(c.mid) && c.mid > 0) return c.mid;
   return null;
@@ -164,15 +184,11 @@ function priceOf(c: OptionCandidate): { price: number; source: "ask" | "mid" } |
   return null; 
 }
 
-// Upgraded Theoretical Premium using HV
 function theoreticalPremium(c: OptionCandidate, ltp: number, hv: number): number {
   const isCall = c.right === "C";
   const intrinsic = Math.max(0, isCall ? ltp - c.strike : c.strike - ltp);
   const T = Math.max(1 / 365, (Date.parse(c.expiry + "T20:00:00Z") - Date.now()) / (365 * 24 * 3600 * 1000));
-  
-  // Options typically trade at a slight premium to Historical Volatility (IV > HV)
   const adjustedVol = Math.max(0.20, Math.min(0.80, hv * 1.15)); 
-  
   const tv = 0.25 * ltp * Math.sqrt(T) * adjustedVol;
   const tvCapped = Math.min(tv, Math.max(2, 0.15 * Math.max(ltp, c.strike)));
   return round2(intrinsic + tvCapped);
@@ -229,19 +245,27 @@ export async function POST(req: NextRequest) {
     if (!parsed.success) return NextResponse.json({ error: "Bad input" }, { status: 400 });
     const ticker = parsed.data.ticker;
 
-    // 1. Snapshot & Prices
-    const snap = await withTimeout(getStockSnapshot(ticker), 8000).catch(() => null);
-    const day = snap?.ticker?.day;
-    const prev = snap?.ticker?.prevDay;
-    const lastTradePrice = snap?.ticker?.lastTrade?.p;
-    const ltp = lastTradePrice ?? day?.c ?? prev?.c ?? day?.o ?? prev?.o ?? null;
-    if (!ltp || !day || !prev) return insuff("snapshot missing ltp/day/prev");
-
-    // 2. Technicals & Aggs
+    // 1. Technicals & Aggs (Fetched first to act as fallback for off-hours/holidays)
     const bars = await withTimeout(getStockAggs(ticker, 260), 10000).catch(() => []);
     if (!bars.length) return insuff("no 1y bars");
     const closes = bars.map((b) => b.c);
+    const lastHistoricalClose = closes[closes.length - 1];
+
+    // 2. Snapshot & Prices
+    const snap = await withTimeout(getStockSnapshot(ticker), 8000).catch(() => null);
+    const day = snap?.ticker?.day ?? null;
+    const prev = snap?.ticker?.prevDay ?? null;
+    const lastTradePrice = snap?.ticker?.lastTrade?.p ?? null;
     
+    let ltp = lastTradePrice ?? day?.c ?? prev?.c ?? lastHistoricalClose;
+
+    // If off-hours, weekend, or holiday, pin to the official historical close
+    if (!isRegularTradingHoursNy() && lastHistoricalClose) {
+      ltp = lastHistoricalClose;
+    }
+
+    if (!ltp) return insuff("unable to determine ltp");
+
     // Calculate True Historical Volatility
     const stockHv = calculateHV(closes);
 
@@ -309,7 +333,7 @@ export async function POST(req: NextRequest) {
 
     const quoted = priceOf(chosen);
     
-    // NEW: Pricing Engine
+    // Pricing Engine
     let baseEntryPrice = quoted ? round2(quoted.price) : theoreticalPremium(chosen, ltp, stockHv);
     
     // Add 5% Fill Buffer if it's theoretical so the limit order actually triggers
@@ -318,7 +342,7 @@ export async function POST(req: NextRequest) {
 
     if (!entryPrice || !isFinite(entryPrice) || entryPrice <= 0) return insuff("options_unpriced");
 
-    // NEW: Smarter Targets (25% Win, 15% Loss)
+    // Smarter Targets (25% Win, 15% Loss)
     const tpPremium = round2(entryPrice * 1.25); 
     const stopPremium = round2(entryPrice * 0.85);
 
@@ -349,7 +373,7 @@ export async function POST(req: NextRequest) {
 
     const resp = await withTimeout(
       client.responses.create({
-        model: "gpt-5.2", 
+        model: "gpt-5.4", 
         input: [
           { role: "system", content: SYSTEM + "\n\n" + LEAPS_V2_FORMAT },
           { role: "user", content: userPrompt },
