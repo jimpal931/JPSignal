@@ -183,3 +183,34 @@ export async function getSpecificOptionSnapshot(contractTicker: string): Promise
     return null;
   }
 }
+
+export type FinancialResponse = {
+  results?: Array<{
+    start_date: string;
+    end_date: string;
+    timeframe: string;
+    financials: {
+      income_statement?: {
+        revenues?: { value: number };
+        net_income_loss?: { value: number };
+        operating_expenses?: { value: number };
+      };
+      balance_sheet?: {
+        assets?: { value: number };
+        liabilities?: { value: number };
+        equity?: { value: number };
+      };
+      cash_flow_statement?: {
+        net_cash_flow_from_operating_activities?: { value: number };
+      };
+    };
+  }>;
+};
+
+/** Fetch Last 4 Quarters of Raw Financials for Layer 3 Analysis */
+export async function getStockFinancials(ticker: string): Promise<FinancialResponse> {
+  // Pulling quarterly filings, limited to the 4 most recent records
+  return jget<FinancialResponse>(
+    `/vX/reference/financials?ticker=${encodeURIComponent(ticker)}&timeframe=quarterly&limit=4&sort=filing_date`
+  );
+}

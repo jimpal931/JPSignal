@@ -44,6 +44,12 @@ export default async function SignalsPage() {
               >
                 Leaps
               </Link>
+              <Link 
+                href="/dashboard" 
+                className="px-4 py-1.5 text-sm font-medium bg-zinc-800 text-white rounded-md shadow-sm"
+              >
+                Hybrid
+              </Link>
             </div>
           </div>
           

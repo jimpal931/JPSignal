@@ -44,6 +44,12 @@ export default async function LeapsPage() {
               >
                 Leaps
               </Link>
+              <Link 
+                href="/dashboard" 
+                className="px-4 py-1.5 text-sm font-medium text-zinc-400 hover:text-white hover:bg-zinc-800/50 rounded-md transition-all"
+              >
+                Hybrid
+              </Link>
             </div>
           </div>
           

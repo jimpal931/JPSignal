@@ -153,6 +153,18 @@ export default async function Page() {
                 color="bg-emerald-600"
                 glow="shadow-[0_0_20px_rgba(16,185,129,0.3)]"
               />
+
+              <FeatureCard 
+                title="Hybrid Stock Evaluation" 
+                description="Long-term Equity for wealth generation."
+                href="/dashboard"
+                isPro={pro}
+                icon={
+                  <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                }
+                color="bg-indigo-600"
+                glow="shadow-[0_0_20px_rgba(16,185,129,0.3)]"
+              />
             </div>
           </div>
         )}
