@@ -96,7 +96,7 @@ export default async function SignalsPage() {
 
                {/* The Form Component */}
                <div className="relative z-10">
-                 <SignalForm />
+                 <SignalForm signalId="stock" />
                </div>
             </div>
 

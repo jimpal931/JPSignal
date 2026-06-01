@@ -96,7 +96,7 @@ export default async function LeapsPage() {
                {/* The Form Component */}
                <div className="relative z-10">
                  {/* Make sure this component exists! */}
-                 <LeapSignalForm />
+                 <LeapSignalForm signalId="leap"/>
                </div>
             </div>
 
