@@ -61,7 +61,7 @@ Overall stance: {{BULLISH|BEARISH|NEUTRAL}}; chosen side: {{CALL|PUT}}.
 - **Strategy:** Buy LEAP {{CALL|PUT}}
 - **Expiry:** {{expiry}}
 - **Strike:** $\{\{strike\}\}
-- **Entry Premium:** $\{\{entry_premium\}\} (Includes +5% fill buffer over theoretical)
+- **Entry Premium:** $\{\{entry_premium\}\} {{entry_price_note}}
 - **Position Size:** 1 to 2 contracts max (Adjust per risk tolerance)
 - **Hard Stop-Loss:** $\{\{stop_premium\}\} (-15% premium loss)
 - **Take Profit Target:** $\{\{tp_premium\}\} (+25% premium gain)
@@ -339,6 +339,10 @@ export async function POST(req: NextRequest) {
     // Add 5% Fill Buffer if it's theoretical so the limit order actually triggers
     const entryPrice = quoted ? baseEntryPrice : round2(baseEntryPrice * 1.05);
     const entryPriceSource = quoted ? quoted.source : "theoretical (buffered)";
+    // Dynamic text note injection for the LLM template structure
+    const entryPriceNote = entryPriceSource === "theoretical (buffered)"
+      ? "(Includes +5% fill buffer over theoretical)"
+      : "(Real market proxy)";
 
     if (!entryPrice || !isFinite(entryPrice) || entryPrice <= 0) return insuff("options_unpriced");
 
@@ -361,6 +365,7 @@ export async function POST(req: NextRequest) {
       chosen_oi: chosen.oi ?? "N/A",
       entry_premium: entryPrice,
       entry_price_source: entryPriceSource,
+      entry_price_note: entryPriceNote,
       stop_premium: stopPremium,
       tp_premium: tpPremium,
       sentiment_label: sentiment.label,

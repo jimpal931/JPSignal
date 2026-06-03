@@ -65,8 +65,10 @@ export type OptionCandidate = {
 // FIX: Updated Type Definition for Starter Plan
 type SnapshotItem = {
   ticker: string;
-  day?: { v?: number };
-  // Starter plan often omits last_quote entirely, so we rely on last_trade
+  day?: { 
+    v?: number; 
+    close?: number; // Added this to catch the market-closed price
+  };
   last_trade?: { p?: number; s?: number; t?: number }; 
   open_interest?: number;
   greeks?: { delta?: number; theta?: number; gamma?: number; vega?: number };
@@ -114,13 +116,13 @@ export async function getLeapOptionCandidates(
 
   // 3. Merge
   return rawContracts
-    .map(r => {
+    .map(r => { 
       const snap = snapMap.get(r.ticker);
       
-      // STARTER PLAN FIX: 
-      // We ignore Bid/Ask because the plan doesn't provide them.
-      // We strictly use Last Trade Price (p) as the "mid" proxy.
-      const tradePrice = snap?.last_trade?.p ?? null;
+      // DYNAMIC MARKET CONDITION FIX:
+      // 1. If market is OPEN and trading: uses last_trade.p
+      // 2. If market is CLOSED (or contract hasn't traded today): falls back to day.close
+      const tradePrice = snap?.day?.close ?? null;
       
       return {
         contract: r.ticker,
@@ -166,8 +168,10 @@ export async function getSpecificOptionSnapshot(contractTicker: string): Promise
 
     if (!snap) return null;
 
-    // STARTER PLAN FIX: Use Last Trade
-    const tradePrice = snap.last_trade?.p ?? null;
+    // DYNAMIC MARKET CONDITION FIX:
+    // 1. If market is OPEN and trading: uses last_trade.p
+   // 2. If market is CLOSED (or contract hasn't traded today): falls back to day.close
+    const tradePrice = snap?.day?.close ?? null;
 
     return {
       bid: null,
