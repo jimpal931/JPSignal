@@ -9,6 +9,7 @@ import LeapSignalForm from "@/components/LeapsSignalForm"; // Ensure you have th
 import Link from "next/link";
 import AuthButton from "@/components/AuthButton";
 import BillingPortalButton from "@/components/BillingPortalButton";
+import TradingViewChart from "@/components/TradingViewChart";
 type HybridReport = {
   ticker?: string;
   processedTimestamp?: string;
@@ -227,6 +228,47 @@ export default function HybridDashboard() {
                     </span>
                   </div>
                 </div>
+                <div className="md:col-span-3">
+                  <TradingViewChart 
+                    mode="hybrid"
+                    ticker={report.ticker || ticker || "UNKNOWN"}
+                    score={report.compositeScore ?? 0}
+                  />
+                </div>
+                {/* Interactive Chart Explainer Legend */}
+<div className="bg-zinc-900/60 border border-zinc-800 p-4 rounded-xl mt-3 grid grid-cols-1 sm:grid-cols-3 gap-4 font-mono text-xs">
+  
+  <div>
+    <h4 className="text-white font-bold mb-1.5 flex items-center gap-2">
+      <span className="h-2 w-4 bg-indigo-500 rounded-sm inline-block"></span> 
+      THE TRACKING LINE
+    </h4>
+    <p className="text-zinc-400 leading-relaxed">
+      Plots the stocks overall health score over the last 20 days. It combines pure chart momentum (60%) with real corporate earnings safety (40%).
+    </p>
+  </div>
+
+  <div>
+    <h4 className="text-emerald-400 font-bold mb-1.5 flex items-center gap-2">
+      <span className="h-0.5 w-4 border-t border-dashed border-emerald-400 inline-block"></span> 
+      ABOVE THE GREEN LINE (70+)
+    </h4>
+    <p className="text-zinc-400 leading-relaxed">
+      <strong className="text-emerald-400">Optimal conditions.</strong> Technical trends match healthy underlying financial data. The system authorizes maximum trade allocation limits safely.
+    </p>
+  </div>
+
+  <div>
+    <h4 className="text-amber-500 font-bold mb-1.5 flex items-center gap-2">
+      <span className="h-0.5 w-4 border-t border-dashed border-amber-500 inline-block"></span> 
+      BELOW THE AMBER LINE (&lt;40)
+    </h4>
+    <p className="text-zinc-400 leading-relaxed">
+      <strong className="text-rose-400">System Danger.</strong> If the line falls below 40, a security circuit breaker trips, changing the bias to cash to protect your portfolio.
+    </p>
+  </div>
+
+</div>
 
                 {/* Layer 1 Module Display */}
                 <div className="bg-zinc-900 border border-zinc-800 p-5 rounded-xl space-y-4">

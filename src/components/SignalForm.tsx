@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import TradingViewChart from "@/components/TradingViewChart";
 
 interface TradeDetails {
   instrument: string;
@@ -175,6 +176,16 @@ export default function SignalForm({ signalId }: { signalId: string }) {
                     <div className="bg-indigo-500 h-2 rounded-full transition-all duration-500" style={{ width: `${report.details.confidence * 100}%` }}></div>
                   </div>
                 </div>
+              </div>
+              <div className="md:col-span-3">
+                <TradingViewChart 
+                  mode="stock"
+                  ticker={report.details.instrument}
+                  entryPrice={report.details.entry_price}
+                  stopLoss={report.details.stop_loss}
+                  targetPrice={report.details.take_profit}
+                  direction={report.details.direction}
+                  />
               </div>
 
               

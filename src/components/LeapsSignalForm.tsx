@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import TradingViewChart from "@/components/TradingViewChart";
 
 // Exact interface reflecting the flat schema inside /api/leapsignalv2
 interface LeapTradeDetails {
@@ -180,6 +181,16 @@ export default function LeapsSignalForm({ signalId }: { signalId: string }) {
                     {report.details.conviction}
                   </span>
                 </div>
+              </div>
+              <div className="md:col-span-3">
+                <TradingViewChart 
+                  mode="leap"
+                  ticker={report.details.instrument}
+                  entryPrice={report.details.entry_price}
+                  stopLoss={report.details.stop_loss}
+                  targetPrice={report.details.profit_target}
+                  direction={report.details.direction}
+                />
               </div>
 
               {/* Bento Card 2: Contract Parameters and Target Matrix */}
